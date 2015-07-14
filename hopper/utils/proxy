@@ -1,0 +1,107 @@
+#!/usr/bin/env python
+
+# Copyright (c) 2015 Xilinx Inc.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+
+import os
+import sys
+import socket
+import select
+import re
+from urlparse import urlparse
+
+if not(sys.platform == "linux" or sys.platform == "linux2"):
+	sys.stderr.write("This proxy script currently only works with linux.\n")
+	sys.exit(-1)
+
+# Default to using the http proxy for everything
+def getProxy():
+	if "http_proxy" in os.environ:
+		uri = urlparse(os.environ["http_proxy"])
+		if uri:
+			return (uri.hostname, uri.port)
+	return ("proxy", 8080)
+
+def serviceReachable(host, port):
+	try:
+		s = socket.create_connection((host, port), 1)
+		s.close()
+		return True
+	except:
+		pass
+	return False
+
+def prepareHttpProxy(socket, target):
+	# Inform proxy of actual target
+	socket.send("CONNECT %s:%s HTTP/1.0\r\n\r\n" % (target[0], target[1]))
+	magicstring = "^HTTP/(1.[01]) ([0-9]{3}) (.*)\r\n\r\n"
+	linedata = ""
+	while True:
+		result = select.select([socket], [], [])
+		if socket in result[0]:
+			data = socket.recv(1)
+			if data and len(data) > 0:
+				linedata = linedata + data
+				m = re.search(magicstring, linedata, re.MULTILINE)
+				if m:
+					if int(m.group(2)) >= 200 and int(m.group(2)) < 300:
+						return True
+					else:
+						return False
+	return False
+
+buffersize = 4096
+proxy = getProxy()
+target = (sys.argv[1], int(sys.argv[2]))
+internaltarget = serviceReachable(target[0], target[1])
+
+# Open a socket to the proxy or the internal target
+targetsocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+targetsocket.connect(target if internaltarget else proxy)
+if not internaltarget:
+	if not prepareHttpProxy(targetsocket, target):
+		sys.exit(-1)
+
+try:
+	while True:
+		result = select.select([targetsocket, sys.stdin], [], [targetsocket, sys.stdin], 5)
+		if targetsocket in result[0]:
+			data = os.read(targetsocket.fileno(), buffersize)
+			if len(data) <= 0:
+				break
+
+			sent = os.write(sys.stdout.fileno(), data)
+			if sent <= 0:
+				break
+			else:
+				sys.stdout.flush()
+
+		if sys.stdin in result[0]:
+			data = os.read(sys.stdin.fileno(), buffersize)
+			if len(data) <= 0:
+				break
+
+			sent = os.write(targetsocket.fileno(), data)
+			if sent <= 0:
+				break
+except KeyboardInterrupt:
+	pass
+
